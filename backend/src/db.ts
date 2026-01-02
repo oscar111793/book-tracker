@@ -61,7 +61,7 @@ const mapRowToBook = (row: any): Book => ({
  */
 export const getAllBooks = (): Promise<Book[]> => {
   return new Promise((resolve, reject) => {
-    db.all('SELECT * FROM books ORDER BY createdAt DESC', (err, rows) => {
+    db.all('SELECT * FROM books ORDER BY createdAt DESC', (err: Error | null, rows: any[]) => {
       if (err) return reject(err);
       resolve(rows.map(mapRowToBook));
     });
@@ -79,10 +79,10 @@ export const getAllBooks = (): Promise<Book[]> => {
 export const createBook = (title: string, author: string): Promise<Book> => {
   return new Promise((resolve, reject) => {
     const stmt = db.prepare('INSERT INTO books (title, author, status, rating) VALUES (?, ?, ?, ?)');
-    stmt.run(title, author, 'UNREAD', 0, function (err) {
+    stmt.run(title, author, 'UNREAD', 0, function (this: sqlite3.RunResult, err: Error | null) {
       if (err) return reject(err);
       // Fetch the newly created book to return complete object
-      db.get('SELECT * FROM books WHERE id = ?', [this.lastID], (getErr, row) => {
+      db.get('SELECT * FROM books WHERE id = ?', [this.lastID], (getErr: Error | null, row: any) => {
         if (getErr) return reject(getErr);
         resolve(mapRowToBook(row));
       });
@@ -106,13 +106,13 @@ export const toggleBookStatus = (id: number): Promise<Book | null> => {
         WHERE id = ?
       `,
       [id],
-      function (err) {
+      function (this: sqlite3.RunResult, err: Error | null) {
         if (err) return reject(err);
         // If no rows were updated, book doesn't exist
         if (this.changes === 0) return resolve(null);
 
         // Fetch updated book to return
-        db.get('SELECT * FROM books WHERE id = ?', [id], (getErr, row) => {
+        db.get('SELECT * FROM books WHERE id = ?', [id], (getErr: Error | null, row: any) => {
           if (getErr) return reject(getErr);
           resolve(row ? mapRowToBook(row) : null);
         });
@@ -129,7 +129,7 @@ export const toggleBookStatus = (id: number): Promise<Book | null> => {
  */
 export const deleteBook = (id: number): Promise<boolean> => {
   return new Promise((resolve, reject) => {
-    db.run('DELETE FROM books WHERE id = ?', [id], function (err) {
+    db.run('DELETE FROM books WHERE id = ?', [id], function (this: sqlite3.RunResult, err: Error | null) {
       if (err) return reject(err);
       // this.changes indicates number of rows affected
       resolve(this.changes > 0);
@@ -150,13 +150,13 @@ export const updateBookRating = (id: number, rating: number): Promise<Book | nul
     db.run(
       `UPDATE books SET rating = ? WHERE id = ?`,
       [rating, id],
-      function (err) {
+      function (this: sqlite3.RunResult, err: Error | null) {
         if (err) return reject(err);
         // If no rows were updated, book doesn't exist
         if (this.changes === 0) return resolve(null);
 
         // Fetch updated book to return
-        db.get('SELECT * FROM books WHERE id = ?', [id], (getErr, row) => {
+        db.get('SELECT * FROM books WHERE id = ?', [id], (getErr: Error | null, row: any) => {
           if (getErr) return reject(getErr);
           resolve(row ? mapRowToBook(row) : null);
         });
