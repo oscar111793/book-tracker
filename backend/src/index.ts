@@ -6,7 +6,8 @@ import {
   deleteBook,
   getAllBooks,
   toggleBookStatus,
-  updateBookRating
+  updateBookRating,
+  initializeDatabase
 } from './db';
 
 /**
@@ -165,13 +166,27 @@ if (process.env.NODE_ENV === 'production') {
 
 /**
  * Start the Express server
- * Listens on the configured PORT (default: 4000)
+ * Initializes database connection and syncs tables, then starts the server
  * Uses process.env.PORT for Render.com dynamic port assignment
  */
-app.listen(PORT, () => {
-  console.log(`Book Tracker API listening on port ${PORT}`);
-  if (process.env.NODE_ENV === 'production') {
-    console.log('Serving static files from frontend/dist');
+const startServer = async () => {
+  try {
+    // Initialize database connection and sync tables
+    await initializeDatabase();
+
+    // Start the server
+    app.listen(PORT, () => {
+      console.log(`Book Tracker API listening on port ${PORT}`);
+      if (process.env.NODE_ENV === 'production') {
+        console.log('Serving static files from frontend/dist');
+      }
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
   }
-});
+};
+
+// Start the server
+startServer();
 

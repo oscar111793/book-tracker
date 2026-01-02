@@ -1,57 +1,74 @@
 import fs from 'fs';
 import path from 'path';
-import sqlite3 from 'sqlite3';
-import { Book, BookStatus } from './types';
+import { Sequelize } from 'sequelize';
+import BookModel, { initializeBookModel } from './models/Book';
 
 /**
- * Database Configuration
- * Sets up SQLite database file path and ensures data directory exists
+ * Database Connection Configuration
+ * Uses PostgreSQL if DATABASE_URL is provided, otherwise falls back to SQLite for local development
  */
-const dbPath = path.join(process.cwd(), 'data', 'books.db');
-fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+let sequelize: Sequelize;
+let Book: typeof BookModel;
 
-const sqlite = sqlite3.verbose();
-const db = new sqlite.Database(dbPath);
-
-/**
- * Database Schema Initialization
- * Creates the books table if it doesn't exist and ensures rating column exists
- * This handles both new installations and migrations for existing databases
- */
-db.serialize(() => {
-  // Create main books table with core fields
-  db.run(`
-    CREATE TABLE IF NOT EXISTS books (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT NOT NULL,
-      author TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'UNREAD',
-      createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  // Add rating column for existing databases (migration support)
-  // Errors are ignored as column may already exist
-  db.run(`ALTER TABLE books ADD COLUMN rating INTEGER NOT NULL DEFAULT 0`, () => {
-    // ignore errors (column may already exist)
+if (process.env.DATABASE_URL) {
+  // PostgreSQL connection using DATABASE_URL (for production/cloud deployments)
+  sequelize = new Sequelize(process.env.DATABASE_URL, {
+    dialect: 'postgres',
+    dialectOptions: {
+      ssl: process.env.DATABASE_URL?.includes('sslmode=require') ? {
+        require: true,
+        rejectUnauthorized: false,
+      } : false,
+    },
+    logging: process.env.NODE_ENV === 'development' ? console.log : false,
   });
-});
+  console.log('Using PostgreSQL database');
+} else {
+  // SQLite fallback for local development
+  const dbPath = path.join(process.cwd(), 'data', 'books.db');
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+
+  sequelize = new Sequelize({
+    dialect: 'sqlite',
+    storage: dbPath,
+    logging: process.env.NODE_ENV === 'development' ? console.log : false,
+  });
+  console.log('Using SQLite database (local development)');
+}
+
+// Initialize Book model after sequelize is created
+Book = initializeBookModel(sequelize);
 
 /**
- * Maps database row to Book interface
- * Converts raw SQLite row data to typed Book object
- * 
- * @param row - Raw database row object
- * @returns Book object with proper types
+ * Initialize Database Connection
+ * Tests the connection and syncs the database schema
  */
-const mapRowToBook = (row: any): Book => ({
-  id: row.id,
-  title: row.title,
-  author: row.author,
-  status: row.status as BookStatus,
-  createdAt: row.createdAt,
-  rating: Number(row.rating ?? 0),
-});
+export const initializeDatabase = async (): Promise<void> => {
+  try {
+    // Test the connection
+    await sequelize.authenticate();
+    console.log('Database connection established successfully.');
+
+    // Sync all models (create tables if they don't exist)
+    // In production, you might want to use migrations instead
+    await sequelize.sync({ alter: false }); // alter: false means only create if not exists
+    console.log('Database tables synced successfully.');
+  } catch (error) {
+    console.error('Unable to connect to the database:', error);
+    throw error;
+  }
+};
+
+/**
+ * Close Database Connection
+ * Gracefully closes the database connection
+ */
+export const closeDatabase = async (): Promise<void> => {
+  await sequelize.close();
+};
+
+// Export sequelize instance for model initialization
+export { sequelize };
 
 /**
  * Retrieves all books from the database
@@ -59,13 +76,18 @@ const mapRowToBook = (row: any): Book => ({
  * 
  * @returns Promise resolving to array of all books
  */
-export const getAllBooks = (): Promise<Book[]> => {
-  return new Promise((resolve, reject) => {
-    db.all('SELECT * FROM books ORDER BY createdAt DESC', (err: Error | null, rows: any[]) => {
-      if (err) return reject(err);
-      resolve(rows.map(mapRowToBook));
-    });
+export const getAllBooks = async () => {
+  const books = await Book.findAll({
+    order: [['createdAt', 'DESC']],
   });
+  return books.map((book: BookModel) => ({
+    id: book.id,
+    title: book.title,
+    author: book.author,
+    status: book.status,
+    createdAt: book.createdAt.toISOString(),
+    rating: book.rating,
+  }));
 };
 
 /**
@@ -76,49 +98,48 @@ export const getAllBooks = (): Promise<Book[]> => {
  * @param author - Author name (should be trimmed before calling)
  * @returns Promise resolving to the created book with generated ID
  */
-export const createBook = (title: string, author: string): Promise<Book> => {
-  return new Promise((resolve, reject) => {
-    const stmt = db.prepare('INSERT INTO books (title, author, status, rating) VALUES (?, ?, ?, ?)');
-    stmt.run(title, author, 'UNREAD', 0, function (this: sqlite3.RunResult, err: Error | null) {
-      if (err) return reject(err);
-      // Fetch the newly created book to return complete object
-      db.get('SELECT * FROM books WHERE id = ?', [this.lastID], (getErr: Error | null, row: any) => {
-        if (getErr) return reject(getErr);
-        resolve(mapRowToBook(row));
-      });
-    });
+export const createBook = async (title: string, author: string) => {
+  const book = await Book.create({
+    title: title.trim(),
+    author: author.trim(),
+    status: 'UNREAD',
+    rating: 0,
   });
+  return {
+    id: book.id,
+    title: book.title,
+    author: book.author,
+    status: book.status,
+    createdAt: book.createdAt.toISOString(),
+    rating: book.rating,
+  };
 };
 
 /**
  * Toggles book status between READ and UNREAD
- * Uses SQL CASE statement to flip the status
+ * Uses Sequelize update with CASE-like logic
  * 
  * @param id - Book ID to toggle
  * @returns Promise resolving to updated book, or null if not found
  */
-export const toggleBookStatus = (id: number): Promise<Book | null> => {
-  return new Promise((resolve, reject) => {
-    db.run(
-      `
-        UPDATE books
-        SET status = CASE WHEN status = 'READ' THEN 'UNREAD' ELSE 'READ' END
-        WHERE id = ?
-      `,
-      [id],
-      function (this: sqlite3.RunResult, err: Error | null) {
-        if (err) return reject(err);
-        // If no rows were updated, book doesn't exist
-        if (this.changes === 0) return resolve(null);
+export const toggleBookStatus = async (id: number) => {
+  const book = await Book.findByPk(id);
+  if (!book) {
+    return null;
+  }
 
-        // Fetch updated book to return
-        db.get('SELECT * FROM books WHERE id = ?', [id], (getErr: Error | null, row: any) => {
-          if (getErr) return reject(getErr);
-          resolve(row ? mapRowToBook(row) : null);
-        });
-      }
-    );
-  });
+  // Toggle status
+  const newStatus = book.status === 'READ' ? 'UNREAD' : 'READ';
+  await book.update({ status: newStatus });
+
+  return {
+    id: book.id,
+    title: book.title,
+    author: book.author,
+    status: book.status,
+    createdAt: book.createdAt.toISOString(),
+    rating: book.rating,
+  };
 };
 
 /**
@@ -127,14 +148,13 @@ export const toggleBookStatus = (id: number): Promise<Book | null> => {
  * @param id - Book ID to delete
  * @returns Promise resolving to true if book was deleted, false if not found
  */
-export const deleteBook = (id: number): Promise<boolean> => {
-  return new Promise((resolve, reject) => {
-    db.run('DELETE FROM books WHERE id = ?', [id], function (this: sqlite3.RunResult, err: Error | null) {
-      if (err) return reject(err);
-      // this.changes indicates number of rows affected
-      resolve(this.changes > 0);
-    });
-  });
+export const deleteBook = async (id: number): Promise<boolean> => {
+  const book = await Book.findByPk(id);
+  if (!book) {
+    return false;
+  }
+  await book.destroy();
+  return true;
 };
 
 /**
@@ -145,23 +165,19 @@ export const deleteBook = (id: number): Promise<boolean> => {
  * @param rating - New rating value (1-5)
  * @returns Promise resolving to updated book, or null if not found
  */
-export const updateBookRating = (id: number, rating: number): Promise<Book | null> => {
-  return new Promise((resolve, reject) => {
-    db.run(
-      `UPDATE books SET rating = ? WHERE id = ?`,
-      [rating, id],
-      function (this: sqlite3.RunResult, err: Error | null) {
-        if (err) return reject(err);
-        // If no rows were updated, book doesn't exist
-        if (this.changes === 0) return resolve(null);
+export const updateBookRating = async (id: number, rating: number) => {
+  const book = await Book.findByPk(id);
+  if (!book) {
+    return null;
+  }
 
-        // Fetch updated book to return
-        db.get('SELECT * FROM books WHERE id = ?', [id], (getErr: Error | null, row: any) => {
-          if (getErr) return reject(getErr);
-          resolve(row ? mapRowToBook(row) : null);
-        });
-      }
-    );
-  });
+  await book.update({ rating });
+  return {
+    id: book.id,
+    title: book.title,
+    author: book.author,
+    status: book.status,
+    createdAt: book.createdAt.toISOString(),
+    rating: book.rating,
+  };
 };
-
